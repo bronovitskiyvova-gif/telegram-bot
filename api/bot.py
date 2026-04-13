@@ -1,15 +1,15 @@
-
 import os
 import re
-import json
 import requests
 from bs4 import BeautifulSoup
-
+from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Update, InputMediaPhoto
 from aiogram.fsm.storage.memory import MemoryStorage
 
 TOKEN = os.getenv("BOT_TOKEN")
+
+app = FastAPI()
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -18,91 +18,77 @@ headers = {
     "User-Agent": "Mozilla/5.0"
 }
 
-# =========================
-# 🧠 ОЧИСТКА ОПИСУ
-# =========================
-def clean(text):
+
+def clean(text: str) -> str:
     if not text:
         return "Опис не знайдено"
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text[:1200]
 
 
-# =========================
-# 📸 ФОТО (максимум)
-# =========================
 def extract_images(soup):
     images = set()
 
     for img in soup.find_all("img"):
         for attr in ["src", "data-src", "data-lazy"]:
             src = img.get(attr)
-            if src and "http" in src:
-                if not any(x in src for x in ["logo", "icon"]):
-                    images.add(src)
+            if src and "http" in src and not any(x in src.lower() for x in ["logo", "icon", "avatar"]):
+                images.add(src)
 
-    # JSON (OLX / RIA / LUN)
     for script in soup.find_all("script"):
-        if script.string:
-            urls = re.findall(r'https://[^"]+\.(jpg|jpeg|png|webp)', script.string)
+        content = script.string or script.get_text()
+        if content:
+            urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
             for u in urls:
                 images.add(u)
 
     return list(images)[:10]
 
 
-# =========================
-# 📊 ДАНІ
-# =========================
 def extract_data(text):
     def find(pattern):
-        m = re.search(pattern, text)
-        return m.group(1) if m else None
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).strip() if m else None
 
     data = {}
 
     data["rooms"] = find(r"(\d+)\s*кім")
-    data["area"] = find(r"(\d+\.?\d*)\s*м²")
-    data["price"] = find(r"(\d[\d\s]+)\s?\$")
-    
+    data["area"] = find(r"(\d+(?:[\.,]\d+)?)\s*м²")
+    data["price"] = find(r"(\d[\d\s]*)\s?\$")
+    data["year"] = find(r"\b(20\d{2})\b")
+
     floor = re.search(r"(\d+)\s*/\s*(\d+)", text)
     if floor:
         data["floor"] = f"{floor.group(1)}/{floor.group(2)}"
 
-    data["year"] = find(r"(20\d{2})")
+    low = text.lower()
 
-    # будинок
-    if "цегл" in text.lower():
+    if "цегл" in low:
         data["building"] = "цегляний"
-    elif "панел" in text.lower():
+    elif "панел" in low:
         data["building"] = "панельний"
+    elif "монол" in low:
+        data["building"] = "моноліт"
 
-    # опалення
-    if "централіз" in text.lower():
+    if "централіз" in low:
         data["heating"] = "централізоване"
-    elif "автоном" in text.lower():
+    elif "автоном" in low:
         data["heating"] = "автономне"
 
-    # адреса
-    addr = re.search(r"(вул\.|просп\.|ЖК)[^,.]+", text)
+    addr = re.search(r"(вул\.|просп\.|жк)\s*[^,\n]+", text, re.IGNORECASE)
     if addr:
-        data["address"] = addr.group(0)
+        data["address"] = addr.group(0).strip()
 
     return data
 
 
-# =========================
-# 🌍 ПАРСИНГ
-# =========================
 def parse(url):
-    r = requests.get(url, headers=headers, timeout=10)
+    r = requests.get(url, headers=headers, timeout=15)
     soup = BeautifulSoup(r.text, "html.parser")
-
     text = soup.get_text(" ", strip=True)
 
     data = extract_data(text)
 
-    # опис
     description = ""
     for div in soup.find_all("div"):
         t = div.get_text(" ", strip=True)
@@ -111,16 +97,10 @@ def parse(url):
             break
 
     data["description"] = clean(description)
-
-    # фото
     data["images"] = extract_images(soup)
-
     return data
 
 
-# =========================
-# 📝 ФОРМАТ
-# =========================
 def format_text(d):
     return f"""
 🏠 Кількість кімнат: {d.get('rooms') or '---'}
@@ -131,41 +111,45 @@ def format_text(d):
 🏢 Поверх: {d.get('floor') or '---'}
 
 🧱 Тип будинку: {d.get('building') or '---'}
-📅 Рік: {d.get('year') or '---'}
-🔥 Опалення: {d.get('heating') or '---'}
+📅 Рік введення в експлуатацію: {d.get('year') or '---'}
+🔥 Тип опалення: {d.get('heating') or '---'}
 
 📝 Опис:
-{d.get('description')}
-"""
+{d.get('description') or 'Опис не знайдено'}
+""".strip()
 
 
-# =========================
-# 🤖 ОБРОБКА
-# =========================
 @dp.message()
-async def handle(message: types.Message):
-    url = message.text.strip()
+async def handle_message(message: types.Message):
+    url = (message.text or "").strip()
 
     if not url.startswith("http"):
         await message.answer("❌ Відправ посилання")
         return
 
-    data = parse(url)
+    try:
+        data = parse(url)
 
-    if data["images"]:
-        media = [InputMediaPhoto(media=img) for img in data["images"]]
-        try:
-            await message.answer_media_group(media)
-        except:
-            await message.answer("⚠️ Фото не відправились")
+        if data.get("images"):
+            media = [InputMediaPhoto(media=img) for img in data["images"][:10]]
+            try:
+                await message.answer_media_group(media)
+            except Exception:
+                await message.answer("⚠️ Фото не відправились")
 
-    await message.answer(format_text(data))
+        await message.answer(format_text(data))
+
+    except Exception as e:
+        await message.answer(f"❌ Помилка обробки: {e}")
 
 
-# =========================
-# 🌐 VERCEL HANDLER
-# =========================
-async def handler(request):
+@app.get("/")
+async def root():
+    return {"ok": True, "message": "Telegram bot webhook is running"}
+
+
+@app.post("/")
+async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update(**data)
     await dp.feed_update(bot, update)
