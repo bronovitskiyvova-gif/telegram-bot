@@ -2,6 +2,7 @@ import os
 import re
 import json
 import requests
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
@@ -93,7 +94,6 @@ def ru_to_ua_text(text: str) -> str:
         "год": "рік",
         "в эксплуатации": "в експлуатації",
         "квартира-студия": "квартира-студія",
-        "или": "або",
         "идеальный вариант": "ідеальний варіант",
         "для жизни": "для життя",
         "инвестиции": "інвестиції",
@@ -102,7 +102,6 @@ def ru_to_ua_text(text: str) -> str:
         "шкаф": "шафа",
         "большой": "великий",
         "отдельная": "окрема",
-        "комната": "кімната",
         "территория": "територія",
         "охрана": "охорона",
         "видеонаблюдение": "відеоспостереження",
@@ -138,7 +137,7 @@ def clean_description(text: str) -> str:
         "Показати менше", "Показати більше",
         "Схожі оголошення", "Інші пропозиції",
         "Зателефонувати", "Написати", "Поскаржитися",
-        "Завантажуй застосунок", "фотографій"
+        "Завантажуй застосунок", "фотографій", "Більше про новобудову"
     ]
     for g in garbage:
         text = text.replace(g, "")
@@ -149,6 +148,18 @@ def clean_description(text: str) -> str:
         text = ru_to_ua_text(text)
 
     return text[:2200] if text else "Опис не знайдено"
+
+
+def is_image_url(url: str) -> bool:
+    if not url or not url.startswith("http"):
+        return False
+    low = url.lower()
+    bad = ["logo", "icon", "avatar", "sprite", "svg", "thumb", "thumbnail"]
+    if any(x in low for x in bad):
+        return False
+
+    path = urlparse(url).path.lower()
+    return any(path.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"])
 
 
 def extract_json_ld_objects(soup):
@@ -178,17 +189,17 @@ def extract_description_from_jsonld(soup):
 
 
 def extract_images_from_jsonld(soup):
-    images = set()
+    images = []
     for obj in extract_json_ld_objects(soup):
         if isinstance(obj, dict):
             img = obj.get("image")
-            if isinstance(img, str) and img.startswith("http"):
-                images.add(img)
+            if isinstance(img, str) and is_image_url(img):
+                images.append(img)
             elif isinstance(img, list):
                 for x in img:
-                    if isinstance(x, str) and x.startswith("http"):
-                        images.add(x)
-    return list(images)
+                    if isinstance(x, str) and is_image_url(x):
+                        images.append(x)
+    return images
 
 
 def extract_meta_description(soup):
@@ -202,14 +213,14 @@ def extract_meta_description(soup):
 
 
 def extract_meta_images(soup):
-    images = set()
+    images = []
     for key in ["og:image", "twitter:image"]:
         tag = soup.find("meta", attrs={"property": key}) or soup.find("meta", attrs={"name": key})
         if tag:
             content = tag.get("content")
-            if content and content.startswith("http"):
-                images.add(content)
-    return list(images)
+            if is_image_url(content):
+                images.append(content)
+    return images
 
 
 def extract_section_by_heading(soup, heading_text="Опис"):
@@ -251,6 +262,7 @@ def extract_rooms(text):
         r"кімнат[^\d]{0,10}(\d+)",
         r"(\d+)[-\s]?к\b",
         r"(\d+)\s*комн",
+        r"(\d+)\s*rooms?",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -284,6 +296,8 @@ def extract_floor_olx(text):
     patterns = [
         r"Поверх:\s*(\d+)\s*/\s*(\d+)",
         r"Поверх:\s*(\d+)\s*з\s*(\d+)",
+        r"(\d+)\s*поверх[^0-9]{0,10}з\s*(\d+)",
+        r"(\d+)\s*/\s*(\d+)\s*поверх",
         r"поверх[^0-9]{0,10}(\d+)\s*/\s*(\d+)",
         r"поверх[^0-9]{0,10}(\d+)\s*з\s*(\d+)",
     ]
@@ -300,6 +314,7 @@ def extract_floor_general(text):
         r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
         r"поверх[^0-9]{0,10}(\d+)\s*(?:з|/)\s*(\d+)",
         r"Этаж[^0-9]{0,15}(\d+)\s*(?:из|/)\s*(\d+)",
+        r"(\d+)\s*этаж[^0-9]{0,10}из\s*(\d+)",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -326,6 +341,7 @@ def extract_floor_domria(text):
         r"поверх[^0-9]{0,20}(\d+)\s*(?:з|/)\s*(\d+)",
         r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
         r"Этаж[^0-9]{0,20}(\d+)\s*(?:из|/)\s*(\d+)",
+        r"(\d+)\s*этаж[^0-9]{0,10}из\s*(\d+)",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -341,14 +357,12 @@ def extract_year(text):
 
 def extract_building(text):
     low = text.lower()
-    if "цегл" in low:
+    if "цегл" in low or "кирп" in low:
         return "цегляний"
     if "панел" in low:
         return "панельний"
     if "монол" in low:
         return "моноліт"
-    if "кирп" in low:
-        return "цегляний"
     return None
 
 
@@ -376,7 +390,16 @@ def normalize_address(addr: str) -> str:
     addr = re.sub(r"\bбул\b\.?", "бульвар", addr, flags=re.IGNORECASE)
     addr = re.sub(r"\s+,", ",", addr)
 
-    addr = re.split(r"(?:\s{2,}| Поверх| Площа| Ціна| Кімнат| Опалення| Этаж| Площадь)", addr)[0]
+    stop_words = [
+        "Більше про новобудову",
+        "Ціна", "Площа", "Поверх", "Кімнат",
+        "Этаж", "Площадь", "Цена", "Комнат"
+    ]
+    for stop in stop_words:
+        pos = addr.find(stop)
+        if pos > 0:
+            addr = addr[:pos].strip()
+
     return normalize_spaces(addr)
 
 
@@ -425,7 +448,7 @@ def calc_price_per_m2(price_value, area_value):
 
 
 def collect_images_basic(soup):
-    images = set()
+    images = []
 
     for img in soup.find_all("img"):
         for attr in ["src", "data-src", "data-lazy", "srcset"]:
@@ -436,31 +459,28 @@ def collect_images_basic(soup):
             if attr == "srcset":
                 for part in val.split(","):
                     u = part.strip().split(" ")[0]
-                    if u.startswith("http"):
-                        images.add(u)
+                    if is_image_url(u):
+                        images.append(u)
             else:
-                if val.startswith("http"):
-                    images.add(val)
+                if is_image_url(val):
+                    images.append(val)
 
-    images.update(extract_meta_images(soup))
-    images.update(extract_images_from_jsonld(soup))
+    images.extend(extract_meta_images(soup))
+    images.extend(extract_images_from_jsonld(soup))
 
     for script in soup.find_all("script"):
         content = script.string or script.get_text()
         if not content:
             continue
-        urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
+
+        urls = re.findall(r'https://[^"\']+', content)
         for u in urls:
-            images.add(u)
+            # обрізаємо сміття після посилання
+            u = re.split(r'["\'\s,)]', u)[0]
+            if is_image_url(u):
+                images.append(u)
 
-    cleaned = []
-    for u in images:
-        low = u.lower()
-        if any(x in low for x in ["logo", "icon", "avatar", "svg", "thumb", "thumbnail", "sprite"]):
-            continue
-        cleaned.append(u)
-
-    return list(dict.fromkeys(cleaned))[:10]
+    return list(dict.fromkeys(images))[:10]
 
 
 def build_base_data(text):
@@ -604,26 +624,25 @@ def parse_domria(url):
                 description = clean_description(t)
                 break
 
-    images = set(collect_images_basic(soup))
+    images = list(collect_images_basic(soup))
 
     for script in soup.find_all("script"):
         content = script.string or script.get_text()
         if not content:
             continue
 
-        urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
+        # прямі посилання
+        urls = re.findall(r'https://[^"\']+', content)
         for u in urls:
-            low = u.lower()
-            if any(x in low for x in ["dom.ria", "ria.com", "cdn", "img"]):
-                if not any(bad in low for bad in ["logo", "icon", "avatar", "svg"]):
-                    images.add(u)
+            u = re.split(r'["\'\s,)]', u)[0]
+            if is_image_url(u):
+                images.append(u)
 
+        # json-поля
         more = re.findall(r'"(?:src|url|image|photo|mainImage)"\s*:\s*"([^"]+)"', content)
         for u in more:
-            if u.startswith("http"):
-                low = u.lower()
-                if not any(bad in low for bad in ["logo", "icon", "avatar", "svg"]):
-                    images.add(u)
+            if is_image_url(u):
+                images.append(u)
 
     data["description"] = clean_description(description)
     data["images"] = list(dict.fromkeys(images))[:10]
@@ -631,12 +650,11 @@ def parse_domria(url):
     return data
 
 
-def parse_realtor(url):
+def parse_rieltor(url):
     r = safe_get(url)
     soup = BeautifulSoup(r.text, "html.parser")
     text = soup.get_text(" ", strip=True)
 
-    # даємо максимум джерел для парсингу
     title_text = ""
     if soup.title and soup.title.string:
         title_text = soup.title.string
@@ -646,6 +664,30 @@ def parse_realtor(url):
 
     data = build_base_data(merged_text)
     data["floor"] = extract_floor_general(merged_text)
+
+    # fallback по title, бо на rieltor часто основні дані є в title
+    if not data.get("price"):
+        m = safe_search(r"(\d[\d\s]{2,})\s?\$", title_text)
+        if m:
+            data["price"] = normalize_spaces(m.group(1)) + " $"
+
+    if not data.get("rooms"):
+        m = safe_search(r"(\d+)\s*кімнат", title_text)
+        if m:
+            data["rooms"] = m.group(1)
+
+    if not data.get("floor"):
+        m = safe_search(r"(\d+)\s*поверх\s*(\d+)[-\s]?пов", title_text)
+        if m:
+            data["floor"] = f"{m.group(1)}/{m.group(2)}"
+
+    if not data.get("area"):
+        m = safe_search(r"(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*м²", title_text)
+        if m:
+            data["area"] = m.group(1).replace(",", ".") + " м²"
+
+    if not data.get("address"):
+        data["address"] = extract_address(title_text)
 
     description = extract_section_by_heading(soup, "Опис")
     if not description:
@@ -670,26 +712,23 @@ def parse_realtor(url):
                     description = clean_description(t)
                     break
 
-    images = set(collect_images_basic(soup))
+    images = list(collect_images_basic(soup))
 
     for script in soup.find_all("script"):
         content = script.string or script.get_text()
         if not content:
             continue
 
-        urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
+        urls = re.findall(r'https://[^"\']+', content)
         for u in urls:
-            low = u.lower()
-            if any(x in low for x in ["realtor", "cdn", "img"]):
-                if not any(bad in low for bad in ["logo", "icon", "avatar", "svg"]):
-                    images.add(u)
+            u = re.split(r'["\'\s,)]', u)[0]
+            if is_image_url(u):
+                images.append(u)
 
         more = re.findall(r'"(?:src|url|image|photo|mainImage)"\s*:\s*"([^"]+)"', content)
         for u in more:
-            if u.startswith("http"):
-                low = u.lower()
-                if not any(bad in low for bad in ["logo", "icon", "avatar", "svg"]):
-                    images.add(u)
+            if is_image_url(u):
+                images.append(u)
 
     data["description"] = clean_description(description)
     data["images"] = list(dict.fromkeys(images))[:10]
@@ -732,8 +771,8 @@ def parse_url(url):
     if "olx." in low:
         return parse_olx(url)
 
-    if "realtor.ua" in low:
-        return parse_realtor(url)
+    if "rieltor.ua" in low or "realtor.ua" in low:
+        return parse_rieltor(url)
 
     if "dom.ria" in low or "domria" in low:
         return parse_domria(url)
@@ -747,6 +786,31 @@ def parse_url(url):
 # =========================
 # TELEGRAM
 # =========================
+async def send_images_safely(message: types.Message, images):
+    if not images:
+        return
+
+    try:
+        media = [InputMediaPhoto(media=img) for img in images[:10]]
+        await message.answer_media_group(media)
+        return
+    except Exception:
+        pass
+
+    sent = 0
+    for img in images[:10]:
+        try:
+            await message.answer_photo(img)
+            sent += 1
+            if sent >= 3:
+                break
+        except Exception:
+            continue
+
+    if sent == 0:
+        await message.answer("⚠️ Фото не відправились")
+
+
 @dp.message()
 async def handle_message(message: types.Message):
     url = (message.text or "").strip()
@@ -759,11 +823,7 @@ async def handle_message(message: types.Message):
         data = parse_url(url)
 
         if data.get("images"):
-            media = [InputMediaPhoto(media=img) for img in data["images"][:10]]
-            try:
-                await message.answer_media_group(media)
-            except Exception:
-                await message.answer("⚠️ Фото не відправились")
+            await send_images_safely(message, data["images"])
 
         await message.answer(format_text(data))
 
