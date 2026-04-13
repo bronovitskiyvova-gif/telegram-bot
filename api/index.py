@@ -2,7 +2,7 @@ import os
 import re
 import json
 import requests
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, urlunparse, unquote
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
@@ -31,7 +31,20 @@ def normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
+def clean_url(url: str) -> str:
+    """
+    Прибирає utm та зайвий query-string.
+    Це особливо корисно для rieltor/lun referral links.
+    """
+    try:
+        p = urlparse(url)
+        return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+    except Exception:
+        return url
+
+
 def safe_get(url: str):
+    url = clean_url(url)
     return requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
 
 
@@ -120,18 +133,16 @@ def ru_to_ua_text(text: str) -> str:
         "без дополнительных вложений": "без додаткових вкладень",
         "предоставлю дополнительные фото и видео": "надам додаткові фото та відео",
         "договоримся о просмотре": "домовимось про перегляд",
-        "жили": "жили",
-        "ремонтом": "ремонтом",
-        "квартира": "квартира",
-        "будинок": "будинок",
-        "с ремонтом": "з ремонтом",
         "мебелью": "меблями",
         "техникой": "технікою",
+        "с ремонтом": "з ремонтом",
         "в квартире": "у квартирі",
         "подходит": "підходить",
-        "спокой": "спокій",
-        "сразу": "одразу",
         "после покупки": "після купівлі",
+        "жилья": "житла",
+        "сразу": "одразу",
+        "создана": "створена",
+        "для комфортного": "для комфортного",
     }
 
     for ru, ua in replacements.items():
@@ -177,7 +188,6 @@ def is_image_url(url: str) -> bool:
         return False
 
     low = url.lower()
-
     bad = ["logo", "icon", "avatar", "sprite", ".svg", "thumbnail", "thumb"]
     if any(x in low for x in bad):
         return False
@@ -185,7 +195,6 @@ def is_image_url(url: str) -> bool:
     if any(ext in low for ext in [".jpg", ".jpeg", ".png", ".webp"]):
         return True
 
-    # деякі сайти віддають картинки без розширення, але з image CDN шляхом
     image_markers = ["/image", "/images/", "/photos/", "/photo/", "cdn", "media"]
     return any(marker in low for marker in image_markers)
 
@@ -197,6 +206,40 @@ def normalize_image_url(url: str) -> str:
     if url.startswith("//"):
         url = "https:" + url
     return url
+
+
+def image_dedupe_key(url: str) -> str:
+    """
+    Прибирає query та типові розміри, щоб дублікати OLX/LUN не повторювались.
+    """
+    try:
+        u = normalize_image_url(url)
+        p = urlparse(u)
+        path = p.path.lower()
+
+        # прибираємо суфікси розмірів типу _640x480, -800x600
+        path = re.sub(r'[_-]\d{2,4}x\d{2,4}(?=\.)', '', path)
+
+        # тільки останні 2 сегменти шляху
+        parts = [x for x in path.split("/") if x]
+        short = "/".join(parts[-2:]) if len(parts) >= 2 else path
+        return f"{p.netloc.lower()}::{short}"
+    except Exception:
+        return url.lower()
+
+
+def dedupe_images(images):
+    result = []
+    seen = set()
+    for img in images:
+        if not is_image_url(img):
+            continue
+        key = image_dedupe_key(img)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(img)
+    return result
 
 
 def extract_json_ld_objects(soup):
@@ -338,6 +381,7 @@ def extract_floor_olx(text):
         r"поверх[^0-9]{0,10}(\d+)\s*/\s*(\d+)",
         r"поверх[^0-9]{0,10}(\d+)\s*з\s*(\d+)",
         r"этаж[^0-9]{0,10}(\d+)\s*(?:из|/)\s*(\d+)",
+        r"(\d+)\s*этаж[^0-9]{0,10}из\s*(\d+)",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -518,22 +562,20 @@ def collect_images_basic(soup):
             if is_image_url(u):
                 images.append(u)
 
-        # escaped urls
         esc_urls = re.findall(r'https:\\/\\/[^"\']+', content)
         for u in esc_urls:
-            u = u.replace("\\/", "/")
-            u = normalize_image_url(re.split(r'["\'\s,)]', u)[0])
+            u = normalize_image_url(u.replace("\\/", "/"))
+            u = re.split(r'["\'\s,)]', u)[0]
             if is_image_url(u):
                 images.append(u)
 
-        # JSON-style image keys
         more = re.findall(r'"(?:src|url|image|photo|mainImage|large|medium|small)"\s*:\s*"([^"]+)"', content)
         for u in more:
             u = normalize_image_url(u.replace("\\/", "/"))
             if is_image_url(u):
                 images.append(u)
 
-    return list(dict.fromkeys(images))[:15]
+    return dedupe_images(images)[:20]
 
 
 def build_base_data(text):
@@ -675,7 +717,6 @@ def parse_domria(url):
                 description = clean_description(t)
                 break
 
-    # примусово ще раз через ru->ua
     description = clean_description(description)
     if looks_russian(description):
         description = clean_description(ru_to_ua_text(description))
@@ -813,15 +854,17 @@ async def send_images_safely(message: types.Message, images):
     if not images:
         return
 
+    images = dedupe_images(images)[:10]
+
     try:
-        media = [InputMediaPhoto(media=img) for img in images[:10]]
+        media = [InputMediaPhoto(media=img) for img in images]
         await message.answer_media_group(media)
         return
     except Exception:
         pass
 
     sent = 0
-    for img in images[:10]:
+    for img in images:
         try:
             await message.answer_photo(img)
             sent += 1
