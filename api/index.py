@@ -24,7 +24,7 @@ HEADERS = {
 
 
 # =========================
-# ДОПОМІЖНІ ФУНКЦІЇ
+# HELPERS
 # =========================
 def normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
@@ -34,12 +34,16 @@ def safe_get(url: str):
     return requests.get(url, headers=HEADERS, timeout=25)
 
 
+def safe_search(pattern, text, flags=re.IGNORECASE):
+    return re.search(pattern, text or "", flags)
+
+
 def looks_russian(text: str) -> bool:
     if not text:
         return False
     markers = [
         "продается", "улица", "этаж", "дом", "рядом", "ремонт",
-        "квартира", "отопление", "полностью", "меблирована"
+        "отопление", "меблирована", "просмотр", "санузел", "площадь"
     ]
     low = text.lower()
     return sum(1 for m in markers if m in low) >= 2
@@ -56,6 +60,7 @@ def ru_to_ua_text(text: str) -> str:
         "Улица": "Вулиця",
         "этаж": "поверх",
         "Этаж": "Поверх",
+        "этажа": "поверху",
         "дом": "будинок",
         "Дом": "Будинок",
         "отопление": "опалення",
@@ -92,6 +97,28 @@ def ru_to_ua_text(text: str) -> str:
         "идеальный вариант": "ідеальний варіант",
         "для жизни": "для життя",
         "инвестиции": "інвестиції",
+        "теплый пол": "тепла підлога",
+        "двухконтурный котел": "двоконтурний котел",
+        "шкаф": "шафа",
+        "большой": "великий",
+        "отдельная": "окрема",
+        "комната": "кімната",
+        "территория": "територія",
+        "охрана": "охорона",
+        "видеонаблюдение": "відеоспостереження",
+        "большие": "великі",
+        "панорамные окна": "панорамні вікна",
+        "вид во двор": "вид у двір",
+        "местоположение": "розташування",
+        "новая почта": "Нова пошта",
+        "остановка транспорта": "зупинка транспорту",
+        "удобный выезд": "зручний виїзд",
+        "кольцевую дорогу": "Кільцеву дорогу",
+        "идеально под аренду": "ідеально під оренду",
+        "комфортное проживание": "комфортне проживання",
+        "без дополнительных вложений": "без додаткових вкладень",
+        "предоставлю дополнительные фото и видео": "надам додаткові фото та відео",
+        "договоримся о просмотре": "домовимось про перегляд",
     }
 
     for ru, ua in replacements.items():
@@ -122,10 +149,6 @@ def clean_description(text: str) -> str:
         text = ru_to_ua_text(text)
 
     return text[:2200] if text else "Опис не знайдено"
-
-
-def safe_search(pattern, text, flags=re.IGNORECASE):
-    return re.search(pattern, text, flags)
 
 
 def extract_json_ld_objects(soup):
@@ -227,6 +250,7 @@ def extract_rooms(text):
         r"(\d+)[-\s]?кімнат",
         r"кімнат[^\d]{0,10}(\d+)",
         r"(\d+)[-\s]?к\b",
+        r"(\d+)\s*комн",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -239,6 +263,7 @@ def extract_area_general(text):
     patterns = [
         r"Загальна площа[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*м²",
         r"Площа[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*м²",
+        r"Общая площадь[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*м²",
         r"(\d+(?:[.,]\d+)?)\s*м²",
     ]
     for p in patterns:
@@ -249,7 +274,6 @@ def extract_area_general(text):
 
 
 def extract_area_lun(text):
-    # LUN часто має формат 43.8 / 16.9 / 11.7 м²
     m = safe_search(r"(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*м²", text)
     if m:
         return m.group(1).replace(",", ".") + " м²"
@@ -275,6 +299,7 @@ def extract_floor_general(text):
         r"Поверх[^0-9]{0,15}(\d+)\s*(?:з|/)\s*(\d+)",
         r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
         r"поверх[^0-9]{0,10}(\d+)\s*(?:з|/)\s*(\d+)",
+        r"Этаж[^0-9]{0,15}(\d+)\s*(?:из|/)\s*(\d+)",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -300,6 +325,7 @@ def extract_floor_domria(text):
         r"Поверх[^0-9]{0,20}(\d+)\s*(?:з|/)\s*(\d+)",
         r"поверх[^0-9]{0,20}(\d+)\s*(?:з|/)\s*(\d+)",
         r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
+        r"Этаж[^0-9]{0,20}(\d+)\s*(?:из|/)\s*(\d+)",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -321,6 +347,8 @@ def extract_building(text):
         return "панельний"
     if "монол" in low:
         return "моноліт"
+    if "кирп" in low:
+        return "цегляний"
     return None
 
 
@@ -346,9 +374,9 @@ def normalize_address(addr: str) -> str:
     addr = re.sub(r"\bпросп\b\.?", "проспект", addr, flags=re.IGNORECASE)
     addr = re.sub(r"\bпров\b\.?", "провулок", addr, flags=re.IGNORECASE)
     addr = re.sub(r"\bбул\b\.?", "бульвар", addr, flags=re.IGNORECASE)
+    addr = re.sub(r"\s+,", ",", addr)
 
-    # прибираємо сміття після адреси
-    addr = re.split(r"(?:\s{2,}| Поверх| Площа| Ціна| Кімнат| Опалення)", addr)[0]
+    addr = re.split(r"(?:\s{2,}| Поверх| Площа| Ціна| Кімнат| Опалення| Этаж| Площадь)", addr)[0]
     return normalize_spaces(addr)
 
 
@@ -515,9 +543,8 @@ def parse_lun(url):
     data["area"] = extract_area_lun(text)
     data["floor"] = extract_floor_lun(text)
 
-    # адреса з номером будинку
     if not data.get("address"):
-        m = safe_search(r"(ЖК\s+[^\n]+?\b(?:вулиця|вул\.?|проспект|просп\.?)\s+[^\n,]+,\s*\d+[A-Za-zА-Яа-я]?)", text)
+        m = safe_search(r"(ЖК\s+[^\n]+?(?:вулиця|вул\.?|проспект|просп\.?)\s+[^\n,]+,\s*\d+[A-Za-zА-Яа-я]?)", text)
         if m:
             data["address"] = normalize_address(m.group(1))
 
@@ -584,7 +611,6 @@ def parse_domria(url):
         if not content:
             continue
 
-        # прямі url
         urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
         for u in urls:
             low = u.lower()
@@ -592,7 +618,6 @@ def parse_domria(url):
                 if not any(bad in low for bad in ["logo", "icon", "avatar", "svg"]):
                     images.add(u)
 
-        # json-like image keys
         more = re.findall(r'"(?:src|url|image|photo|mainImage)"\s*:\s*"([^"]+)"', content)
         for u in more:
             if u.startswith("http"):
@@ -611,10 +636,7 @@ def parse_realtor(url):
     soup = BeautifulSoup(r.text, "html.parser")
     text = soup.get_text(" ", strip=True)
 
-    data = build_base_data(text)
-    data["floor"] = extract_floor_general(text)
-
-    # Спроба витягнути параметри з title/meta
+    # даємо максимум джерел для парсингу
     title_text = ""
     if soup.title and soup.title.string:
         title_text = soup.title.string
@@ -622,22 +644,8 @@ def parse_realtor(url):
     meta_desc = extract_meta_description(soup)
     merged_text = " ".join([text, title_text, meta_desc])
 
-    if not data.get("rooms"):
-        data["rooms"] = extract_rooms(merged_text)
-    if not data.get("area"):
-        data["area"] = extract_area_general(merged_text)
-    if not data.get("price"):
-        data["price"] = extract_price(merged_text)
-    if not data.get("address"):
-        data["address"] = extract_address(merged_text)
-    if not data.get("year"):
-        data["year"] = extract_year(merged_text)
-    if not data.get("heating"):
-        data["heating"] = extract_heating(merged_text)
-    if not data.get("building"):
-        data["building"] = extract_building(merged_text)
-    if not data.get("floor"):
-        data["floor"] = extract_floor_general(merged_text)
+    data = build_base_data(merged_text)
+    data["floor"] = extract_floor_general(merged_text)
 
     description = extract_section_by_heading(soup, "Опис")
     if not description:
@@ -652,6 +660,7 @@ def parse_realtor(url):
             ("div", {"id": re.compile(r".*description.*", re.I)}),
             ("article", {}),
             ("main", {}),
+            ("body", {}),
         ]
         for name, attrs in selectors:
             block = soup.find(name, attrs)
@@ -660,13 +669,6 @@ def parse_realtor(url):
                 if len(t) > 120 and any(w in t.lower() for w in ["квартира", "будинок", "ремонт", "поверх", "кімнат"]):
                     description = clean_description(t)
                     break
-
-    if not description:
-        for block in soup.find_all(["div", "section", "article", "p"]):
-            t = normalize_spaces(block.get_text(" ", strip=True))
-            if len(t) > 220 and any(w in t.lower() for w in ["квартира", "будинок", "ремонт", "поверх", "кімнат"]):
-                description = clean_description(t)
-                break
 
     images = set(collect_images_basic(soup))
 
