@@ -2,7 +2,7 @@ import os
 import re
 import json
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
@@ -32,7 +32,7 @@ def normalize_spaces(text: str) -> str:
 
 
 def safe_get(url: str):
-    return requests.get(url, headers=HEADERS, timeout=25)
+    return requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
 
 
 def safe_search(pattern, text, flags=re.IGNORECASE):
@@ -44,7 +44,8 @@ def looks_russian(text: str) -> bool:
         return False
     markers = [
         "продается", "улица", "этаж", "дом", "рядом", "ремонт",
-        "отопление", "меблирована", "просмотр", "санузел", "площадь"
+        "отопление", "меблирована", "просмотр", "санузел", "площадь",
+        "квартира", "жизни", "полностью", "идеальный"
     ]
     low = text.lower()
     return sum(1 for m in markers if m in low) >= 2
@@ -64,6 +65,7 @@ def ru_to_ua_text(text: str) -> str:
         "этажа": "поверху",
         "дом": "будинок",
         "Дом": "Будинок",
+        "дома": "будинку",
         "отопление": "опалення",
         "Отопление": "Опалення",
         "индивидуальное": "індивідуальне",
@@ -118,6 +120,18 @@ def ru_to_ua_text(text: str) -> str:
         "без дополнительных вложений": "без додаткових вкладень",
         "предоставлю дополнительные фото и видео": "надам додаткові фото та відео",
         "договоримся о просмотре": "домовимось про перегляд",
+        "жили": "жили",
+        "ремонтом": "ремонтом",
+        "квартира": "квартира",
+        "будинок": "будинок",
+        "с ремонтом": "з ремонтом",
+        "мебелью": "меблями",
+        "техникой": "технікою",
+        "в квартире": "у квартирі",
+        "подходит": "підходить",
+        "спокой": "спокій",
+        "сразу": "одразу",
+        "после покупки": "після купівлі",
     }
 
     for ru, ua in replacements.items():
@@ -146,20 +160,43 @@ def clean_description(text: str) -> str:
 
     if looks_russian(text):
         text = ru_to_ua_text(text)
+        text = normalize_spaces(text)
 
-    return text[:2200] if text else "Опис не знайдено"
+    return text[:2600] if text else "Опис не знайдено"
 
 
 def is_image_url(url: str) -> bool:
-    if not url or not url.startswith("http"):
+    if not url:
         return False
+
+    url = unquote(url)
+    if url.startswith("//"):
+        url = "https:" + url
+
+    if not url.startswith("http"):
+        return False
+
     low = url.lower()
-    bad = ["logo", "icon", "avatar", "sprite", "svg", "thumb", "thumbnail"]
+
+    bad = ["logo", "icon", "avatar", "sprite", ".svg", "thumbnail", "thumb"]
     if any(x in low for x in bad):
         return False
 
-    path = urlparse(url).path.lower()
-    return any(path.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"])
+    if any(ext in low for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+        return True
+
+    # деякі сайти віддають картинки без розширення, але з image CDN шляхом
+    image_markers = ["/image", "/images/", "/photos/", "/photo/", "cdn", "media"]
+    return any(marker in low for marker in image_markers)
+
+
+def normalize_image_url(url: str) -> str:
+    if not url:
+        return ""
+    url = unquote(url)
+    if url.startswith("//"):
+        url = "https:" + url
+    return url
 
 
 def extract_json_ld_objects(soup):
@@ -194,11 +231,11 @@ def extract_images_from_jsonld(soup):
         if isinstance(obj, dict):
             img = obj.get("image")
             if isinstance(img, str) and is_image_url(img):
-                images.append(img)
+                images.append(normalize_image_url(img))
             elif isinstance(img, list):
                 for x in img:
                     if isinstance(x, str) and is_image_url(x):
-                        images.append(x)
+                        images.append(normalize_image_url(x))
     return images
 
 
@@ -219,7 +256,7 @@ def extract_meta_images(soup):
         if tag:
             content = tag.get("content")
             if is_image_url(content):
-                images.append(content)
+                images.append(normalize_image_url(content))
     return images
 
 
@@ -300,6 +337,7 @@ def extract_floor_olx(text):
         r"(\d+)\s*/\s*(\d+)\s*поверх",
         r"поверх[^0-9]{0,10}(\d+)\s*/\s*(\d+)",
         r"поверх[^0-9]{0,10}(\d+)\s*з\s*(\d+)",
+        r"этаж[^0-9]{0,10}(\d+)\s*(?:из|/)\s*(\d+)",
     ]
     for p in patterns:
         m = safe_search(p, text)
@@ -458,12 +496,13 @@ def collect_images_basic(soup):
 
             if attr == "srcset":
                 for part in val.split(","):
-                    u = part.strip().split(" ")[0]
+                    u = normalize_image_url(part.strip().split(" ")[0])
                     if is_image_url(u):
                         images.append(u)
             else:
-                if is_image_url(val):
-                    images.append(val)
+                u = normalize_image_url(val)
+                if is_image_url(u):
+                    images.append(u)
 
     images.extend(extract_meta_images(soup))
     images.extend(extract_images_from_jsonld(soup))
@@ -473,14 +512,28 @@ def collect_images_basic(soup):
         if not content:
             continue
 
-        urls = re.findall(r'https://[^"\']+', content)
+        urls = re.findall(r'https?://[^"\']+', content)
         for u in urls:
-            # обрізаємо сміття після посилання
-            u = re.split(r'["\'\s,)]', u)[0]
+            u = normalize_image_url(re.split(r'["\'\s,)]', u)[0])
             if is_image_url(u):
                 images.append(u)
 
-    return list(dict.fromkeys(images))[:10]
+        # escaped urls
+        esc_urls = re.findall(r'https:\\/\\/[^"\']+', content)
+        for u in esc_urls:
+            u = u.replace("\\/", "/")
+            u = normalize_image_url(re.split(r'["\'\s,)]', u)[0])
+            if is_image_url(u):
+                images.append(u)
+
+        # JSON-style image keys
+        more = re.findall(r'"(?:src|url|image|photo|mainImage|large|medium|small)"\s*:\s*"([^"]+)"', content)
+        for u in more:
+            u = normalize_image_url(u.replace("\\/", "/"))
+            if is_image_url(u):
+                images.append(u)
+
+    return list(dict.fromkeys(images))[:15]
 
 
 def build_base_data(text):
@@ -532,10 +585,8 @@ def parse_olx(url):
 
     if not description:
         description = extract_description_from_jsonld(soup)
-
     if not description:
         description = extract_meta_description(soup)
-
     if not description:
         description = extract_section_by_heading(soup, "Опис")
 
@@ -624,28 +675,15 @@ def parse_domria(url):
                 description = clean_description(t)
                 break
 
-    images = list(collect_images_basic(soup))
+    # примусово ще раз через ru->ua
+    description = clean_description(description)
+    if looks_russian(description):
+        description = clean_description(ru_to_ua_text(description))
 
-    for script in soup.find_all("script"):
-        content = script.string or script.get_text()
-        if not content:
-            continue
+    images = collect_images_basic(soup)
 
-        # прямі посилання
-        urls = re.findall(r'https://[^"\']+', content)
-        for u in urls:
-            u = re.split(r'["\'\s,)]', u)[0]
-            if is_image_url(u):
-                images.append(u)
-
-        # json-поля
-        more = re.findall(r'"(?:src|url|image|photo|mainImage)"\s*:\s*"([^"]+)"', content)
-        for u in more:
-            if is_image_url(u):
-                images.append(u)
-
-    data["description"] = clean_description(description)
-    data["images"] = list(dict.fromkeys(images))[:10]
+    data["description"] = description
+    data["images"] = images
     data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
     return data
 
@@ -665,16 +703,17 @@ def parse_rieltor(url):
     data = build_base_data(merged_text)
     data["floor"] = extract_floor_general(merged_text)
 
-    # fallback по title, бо на rieltor часто основні дані є в title
     if not data.get("price"):
         m = safe_search(r"(\d[\d\s]{2,})\s?\$", title_text)
         if m:
             data["price"] = normalize_spaces(m.group(1)) + " $"
 
     if not data.get("rooms"):
-        m = safe_search(r"(\d+)\s*кімнат", title_text)
-        if m:
-            data["rooms"] = m.group(1)
+        for source in [title_text, meta_desc, merged_text]:
+            m = safe_search(r"(\d+)\s*кімнат", source)
+            if m:
+                data["rooms"] = m.group(1)
+                break
 
     if not data.get("floor"):
         m = safe_search(r"(\d+)\s*поверх\s*(\d+)[-\s]?пов", title_text)
@@ -712,26 +751,10 @@ def parse_rieltor(url):
                     description = clean_description(t)
                     break
 
-    images = list(collect_images_basic(soup))
-
-    for script in soup.find_all("script"):
-        content = script.string or script.get_text()
-        if not content:
-            continue
-
-        urls = re.findall(r'https://[^"\']+', content)
-        for u in urls:
-            u = re.split(r'["\'\s,)]', u)[0]
-            if is_image_url(u):
-                images.append(u)
-
-        more = re.findall(r'"(?:src|url|image|photo|mainImage)"\s*:\s*"([^"]+)"', content)
-        for u in more:
-            if is_image_url(u):
-                images.append(u)
+    images = collect_images_basic(soup)
 
     data["description"] = clean_description(description)
-    data["images"] = list(dict.fromkeys(images))[:10]
+    data["images"] = images
     data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
     return data
 
@@ -802,7 +825,7 @@ async def send_images_safely(message: types.Message, images):
         try:
             await message.answer_photo(img)
             sent += 1
-            if sent >= 3:
+            if sent >= 5:
                 break
         except Exception:
             continue
