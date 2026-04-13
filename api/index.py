@@ -142,11 +142,13 @@ async def handle_message(message: types.Message):
 
 
 @app.get("/")
+@app.get("/api")
 async def root():
     return {"ok": True, "message": "Telegram bot webhook is running"}
 
 
 @app.post("/")
+@app.post("/api")
 async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update(**data)
