@@ -16,7 +16,8 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": "Mozilla/5.0",
+    "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 
@@ -34,8 +35,16 @@ def clean_description(text: str) -> str:
     text = normalize_spaces(text)
 
     bad_phrases = [
-        "Продаж", "Оренда", "Мій ЛУН", "Інше", "Новобудови",
-        "показати менше", "показати більше", "завантажуй застосунок"
+        "Продаж",
+        "Оренда",
+        "Мій ЛУН",
+        "Інше",
+        "Новобудови",
+        "показати менше",
+        "показати більше",
+        "завантажуй застосунок",
+        "25 фотографій",
+        "фотографій",
     ]
 
     for phrase in bad_phrases:
@@ -71,14 +80,12 @@ def extract_section_by_heading(soup, heading_text="Опис"):
     for tag in tags:
         txt = normalize_spaces(tag.get_text(" ", strip=True))
         if txt.lower() == heading_text.lower():
-            # сусідній блок
             nxt = tag.find_next(["div", "section", "article", "p"])
             if nxt:
                 block_text = normalize_spaces(nxt.get_text(" ", strip=True))
                 if len(block_text) > 120:
                     return clean_description(block_text)
 
-            # батьківський контейнер
             parent = tag.parent
             if parent:
                 block_text = normalize_spaces(parent.get_text(" ", strip=True))
@@ -112,6 +119,99 @@ def extract_images_from_scripts(soup, preferred_domains=None):
     return images
 
 
+def collect_images(soup, preferred_domains=None):
+    images = set()
+    preferred_domains = preferred_domains or []
+
+    for img in soup.find_all("img"):
+        for attr in ["src", "data-src", "data-lazy", "srcset"]:
+            value = img.get(attr)
+            if not value:
+                continue
+
+            if attr == "srcset":
+                for part in value.split(","):
+                    u = part.strip().split(" ")[0]
+                    low = u.lower()
+                    if u.startswith("http") and not any(x in low for x in ["logo", "icon", "avatar", "svg"]):
+                        if preferred_domains:
+                            if any(domain in low for domain in preferred_domains):
+                                images.add(u)
+                            else:
+                                images.add(u)
+                        else:
+                            images.add(u)
+            else:
+                low = value.lower()
+                if value.startswith("http") and not any(x in low for x in ["logo", "icon", "avatar", "svg"]):
+                    if preferred_domains:
+                        if any(domain in low for domain in preferred_domains):
+                            images.add(value)
+                        else:
+                            images.add(value)
+                    else:
+                        images.add(value)
+
+    script_images = extract_images_from_scripts(soup, preferred_domains=preferred_domains)
+    images |= script_images
+
+    cleaned = []
+    for u in images:
+        low = u.lower()
+        if any(x in low for x in ["thumb", "thumbnail", "small", "logo", "icon", "avatar"]):
+            continue
+        cleaned.append(u)
+
+    return cleaned[:10]
+
+
+def extract_address(text):
+    patterns = [
+        r"(ЖК\s+[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9«»\"'`\-\s]+)",
+        r"(вул\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\-\s]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
+        r"(просп\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\-\s]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
+        r"(пров\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\-\s]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
+        r"(бул\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\-\s]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return normalize_spaces(m.group(1))
+
+    return None
+
+
+def parse_price_to_number(price_value):
+    if not price_value:
+        return None
+    cleaned = price_value.replace("$", "").replace(" ", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
+
+
+def parse_area_to_number(area_value):
+    if not area_value:
+        return None
+    cleaned = area_value.replace("м²", "").replace(" ", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
+
+
+def calc_price_per_m2(price_value, area_value):
+    price_num = parse_price_to_number(price_value)
+    area_num = parse_area_to_number(area_value)
+
+    if not price_num or not area_num or area_num <= 0:
+        return None
+
+    return f"{round(price_num / area_num)} $/м²"
+
+
 def extract_common_data(text):
     def find(pattern):
         m = re.search(pattern, text, re.IGNORECASE)
@@ -121,7 +221,13 @@ def extract_common_data(text):
 
     data["rooms"] = find(r"(\d+)\s*кім")
     data["area"] = find(r"(\d+(?:[\.,]\d+)?)\s*м²")
+    if data["area"]:
+        data["area"] = data["area"].replace(",", ".") + " м²"
+
     data["price"] = find(r"(\d[\d\s]*)\s?\$")
+    if data["price"]:
+        data["price"] = normalize_spaces(data["price"]) + " $"
+
     data["year"] = find(r"\b(20\d{2})\b")
 
     floor = re.search(r"(\d+)\s*/\s*(\d+)", text)
@@ -142,9 +248,8 @@ def extract_common_data(text):
     elif "автоном" in low:
         data["heating"] = "автономне"
 
-    addr = re.search(r"(вул\.|просп\.|жк)\s*[^,\n]+", text, re.IGNORECASE)
-    if addr:
-        data["address"] = addr.group(0).strip()
+    data["address"] = extract_address(text)
+    data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
 
     return data
 
@@ -155,6 +260,7 @@ def format_text(d):
 📍 Адреса: {d.get('address') or '---'}
 
 💰 Ціна: {d.get('price') or '---'}
+📏 Ціна за м²: {d.get('price_per_m2') or '---'}
 📐 Площа: {d.get('area') or '---'}
 🏢 Поверх: {d.get('floor') or '---'}
 
@@ -192,27 +298,10 @@ def parse_olx(url):
                 description = clean_description(t)
                 break
 
-    images = set()
-
-    for img in soup.find_all("img"):
-        for attr in ["src", "data-src", "data-lazy", "srcset"]:
-            src = img.get(attr)
-            if not src:
-                continue
-
-            if attr == "srcset":
-                for part in src.split(","):
-                    u = part.strip().split(" ")[0]
-                    if u.startswith("http") and not any(x in u.lower() for x in ["logo", "icon", "avatar"]):
-                        images.add(u)
-            else:
-                if src.startswith("http") and not any(x in src.lower() for x in ["logo", "icon", "avatar"]):
-                    images.add(src)
-
-    images |= extract_images_from_scripts(soup)
+    images = collect_images(soup)
 
     data["description"] = clean_description(description)
-    data["images"] = list(images)[:10]
+    data["images"] = images
     return data
 
 
@@ -245,33 +334,16 @@ def parse_realtor(url):
                     break
 
     if not description:
-        for div in soup.find_all(["div", "section", "article", "p"]):
-            t = normalize_spaces(div.get_text(" ", strip=True))
-            if len(t) > 350 and any(word in t.lower() for word in ["квартира", "кімнат", "поверх", "будинок"]):
+        for block in soup.find_all(["div", "section", "article", "p"]):
+            t = normalize_spaces(block.get_text(" ", strip=True))
+            if len(t) > 250 and any(word in t.lower() for word in ["квартира", "кімнат", "будинок", "поверх", "ремонт"]):
                 description = clean_description(t)
                 break
 
-    images = set()
-
-    for img in soup.find_all("img"):
-        for attr in ["src", "data-src", "data-lazy", "srcset"]:
-            src = img.get(attr)
-            if not src:
-                continue
-
-            if attr == "srcset":
-                for part in src.split(","):
-                    u = part.strip().split(" ")[0]
-                    if u.startswith("http") and not any(x in u.lower() for x in ["logo", "icon", "avatar"]):
-                        images.add(u)
-            else:
-                if src.startswith("http") and not any(x in src.lower() for x in ["logo", "icon", "avatar"]):
-                    images.add(src)
-
-    images |= extract_images_from_scripts(soup, preferred_domains=["realtor", "cdn", "img"])
+    images = collect_images(soup, preferred_domains=["realtor", "cdn", "img"])
 
     data["description"] = description or "Опис не знайдено"
-    data["images"] = list(images)[:10]
+    data["images"] = images
     return data
 
 
@@ -305,31 +377,14 @@ def parse_domria(url):
     if not description:
         for div in soup.find_all(["div", "section", "article"]):
             t = normalize_spaces(div.get_text(" ", strip=True))
-            if len(t) > 350 and any(word in t.lower() for word in ["квартира", "будинок", "м²", "поверх"]):
+            if len(t) > 250 and any(word in t.lower() for word in ["квартира", "ремонт", "будинок", "поверх"]):
                 description = clean_description(t)
                 break
 
-    images = set()
-
-    for img in soup.find_all("img"):
-        for attr in ["src", "data-src", "data-lazy", "srcset"]:
-            src = img.get(attr)
-            if not src:
-                continue
-
-            if attr == "srcset":
-                for part in src.split(","):
-                    u = part.strip().split(" ")[0]
-                    if u.startswith("http") and not any(x in u.lower() for x in ["logo", "icon", "avatar"]):
-                        images.add(u)
-            else:
-                if src.startswith("http") and not any(x in src.lower() for x in ["logo", "icon", "avatar"]):
-                    images.add(src)
-
-    images |= extract_images_from_scripts(soup, preferred_domains=["dom.ria", "ria", "cdn", "img"])
+    images = collect_images(soup, preferred_domains=["ria", "dom.ria", "cdn"])
 
     data["description"] = description or "Опис не знайдено"
-    data["images"] = list(images)[:10]
+    data["images"] = images
     return data
 
 
@@ -352,27 +407,10 @@ def parse_fallback(url):
                 description = clean_description(t)
                 break
 
-    images = set()
-
-    for img in soup.find_all("img"):
-        for attr in ["src", "data-src", "data-lazy", "srcset"]:
-            src = img.get(attr)
-            if not src:
-                continue
-
-            if attr == "srcset":
-                for part in src.split(","):
-                    u = part.strip().split(" ")[0]
-                    if u.startswith("http") and not any(x in u.lower() for x in ["logo", "icon", "avatar"]):
-                        images.add(u)
-            else:
-                if src.startswith("http") and not any(x in src.lower() for x in ["logo", "icon", "avatar"]):
-                    images.add(src)
-
-    images |= extract_images_from_scripts(soup)
+    images = collect_images(soup)
 
     data["description"] = description or "Опис не знайдено"
-    data["images"] = list(images)[:10]
+    data["images"] = images
     return data
 
 
