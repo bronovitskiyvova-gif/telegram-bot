@@ -1,4 +1,4 @@
+fastapi
 aiogram
 requests
 beautifulsoup4
-playwright
