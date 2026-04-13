@@ -8,9 +8,10 @@ from aiogram.types import Update, InputMediaPhoto
 from aiogram.fsm.storage.memory import MemoryStorage
 
 TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 
 app = FastAPI()
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -22,8 +23,7 @@ headers = {
 def clean(text: str) -> str:
     if not text:
         return "Опис не знайдено"
-    text = re.sub(r"\s+", " ", text).strip()
-    return text[:1200]
+    return re.sub(r"\s+", " ", text).strip()[:1200]
 
 
 def extract_images(soup):
@@ -32,15 +32,14 @@ def extract_images(soup):
     for img in soup.find_all("img"):
         for attr in ["src", "data-src", "data-lazy"]:
             src = img.get(attr)
-            if src and "http" in src and not any(x in src.lower() for x in ["logo", "icon", "avatar"]):
+            if src and src.startswith("http") and not any(x in src.lower() for x in ["logo", "icon", "avatar"]):
                 images.add(src)
 
     for script in soup.find_all("script"):
         content = script.string or script.get_text()
         if content:
             urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
-            for u in urls:
-                images.add(u)
+            images.update(urls)
 
     return list(images)[:10]
 
@@ -51,7 +50,6 @@ def extract_data(text):
         return m.group(1).strip() if m else None
 
     data = {}
-
     data["rooms"] = find(r"(\d+)\s*кім")
     data["area"] = find(r"(\d+(?:[\.,]\d+)?)\s*м²")
     data["price"] = find(r"(\d[\d\s]*)\s?\$")
