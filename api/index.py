@@ -29,6 +29,68 @@ def normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
+def looks_russian(text: str) -> bool:
+    if not text:
+        return False
+    ru_markers = ["квартира", "продается", "этаж", "дом", "улица", "рядом", "ремонт", "отопление"]
+    hits = sum(1 for w in ru_markers if w in text.lower())
+    return hits >= 3
+
+
+def ru_to_ua_text(text: str) -> str:
+    if not text:
+        return text
+
+    replacements = {
+        "Продается": "Продається",
+        "продается": "продається",
+        "квартира": "квартира",
+        "этаж": "поверх",
+        "Этаж": "Поверх",
+        "дом": "будинок",
+        "Дом": "Будинок",
+        "улица": "вулиця",
+        "Улица": "Вулиця",
+        "ремонт": "ремонт",
+        "отопление": "опалення",
+        "Отопление": "Опалення",
+        "индивидуальное": "індивідуальне",
+        "Индивидуальное": "Індивідуальне",
+        "центральное": "централізоване",
+        "Центральное": "Централізоване",
+        "площадь": "площа",
+        "Площадь": "Площа",
+        "комната": "кімната",
+        "комнаты": "кімнати",
+        "рядом": "поруч",
+        "без лифта": "без ліфта",
+        "лифт": "ліфт",
+        "лифта": "ліфта",
+        "полностью": "повністю",
+        "меблирована": "мебльована",
+        "укомплектована": "укомплектована",
+        "техника": "техніка",
+        "кухня": "кухня",
+        "санузел": "санвузол",
+        "состояние": "стан",
+        "качественный": "якісний",
+        "дизайнерский": "дизайнерський",
+        "рядом": "поруч",
+        "метро": "метро",
+        "удобный": "зручний",
+        "просмотр": "перегляд",
+        "звоните": "телефонуйте",
+        "году": "році",
+        "год": "рік",
+        "в эксплуатации": "в експлуатації",
+    }
+
+    for ru, ua in replacements.items():
+        text = text.replace(ru, ua)
+
+    return text
+
+
 def clean_description(text: str) -> str:
     if not text:
         return "Опис не знайдено"
@@ -45,11 +107,19 @@ def clean_description(text: str) -> str:
         text = text.replace(g, "")
 
     text = normalize_spaces(text)
+
+    if looks_russian(text):
+        text = ru_to_ua_text(text)
+
     return text[:2200] if text else "Опис не знайдено"
 
 
 def safe_get(url):
-    return requests.get(url, headers=HEADERS, timeout=20)
+    return requests.get(url, headers=HEADERS, timeout=25)
+
+
+def safe_search(pattern, text, flags=re.IGNORECASE):
+    return re.search(pattern, text, flags)
 
 
 def extract_price(text):
@@ -58,7 +128,7 @@ def extract_price(text):
         r"USD\s?(\d[\d\s]{2,})",
     ]
     for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
+        m = safe_search(p, text)
         if m:
             return normalize_spaces(m.group(1)) + " $"
     return None
@@ -69,9 +139,10 @@ def extract_rooms(text):
         r"(\d+)\s*кім",
         r"(\d+)[-\s]?кімнат",
         r"(\d+)[-\s]?к\b",
+        r"кімнат[^\d]{0,10}(\d+)",
     ]
     for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
+        m = safe_search(p, text)
         if m:
             return m.group(1)
     return None
@@ -79,74 +150,19 @@ def extract_rooms(text):
 
 def extract_area(text):
     patterns = [
-        r"Площа[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*м²",
         r"Загальна площа[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*м²",
+        r"Площа[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*м²",
         r"(\d+(?:[.,]\d+)?)\s*м²",
     ]
     for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
+        m = safe_search(p, text)
         if m:
             return m.group(1).replace(",", ".") + " м²"
     return None
 
 
-def extract_floor_general(text):
-    patterns = [
-        r"Поверх[^0-9]{0,15}(\d+)\s*(?:з|/)\s*(\d+)",
-        r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
-        r"поверх[^0-9]{0,10}(\d+)\s*(?:з|/)\s*(\d+)",
-    ]
-    for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
-        if m:
-            return f"{m.group(1)}/{m.group(2)}"
-    return None
-
-
-def extract_floor_olx(text):
-    patterns = [
-        r"Поверх:\s*(\d+)\s*/\s*(\d+)",
-        r"Поверх:\s*(\d+)\s*з\s*(\d+)",
-        r"поверх[^0-9]{0,10}(\d+)\s*/\s*(\d+)",
-        r"поверх[^0-9]{0,10}(\d+)\s*з\s*(\d+)",
-    ]
-    for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
-        if m:
-            return f"{m.group(1)}/{m.group(2)}"
-    return None
-
-
-def extract_floor_lun(text):
-    patterns = [
-        r"(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*м²[^\.]{0,80}?поверх\s*(\d+)\s*з\s*(\d+)",
-        r"поверх\s*(\d+)\s*з\s*(\d+)",
-        r"(\d+)\s*/\s*(\d+)\s*поверх",
-    ]
-    for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
-        if len(m.groups()) >= 2:
-            if len(m.groups()) == 5:
-                return f"{m.group(4)}/{m.group(5)}"
-            return f"{m.group(1)}/{m.group(2)}"
-    return None
-
-
-def extract_floor_domria(text):
-    patterns = [
-        r"Поверх[^0-9]{0,20}(\d+)\s*(?:з|/)\s*(\d+)",
-        r"поверх[^0-9]{0,20}(\d+)\s*(?:з|/)\s*(\d+)",
-        r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
-    ]
-    for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
-        if m:
-            return f"{m.group(1)}/{m.group(2)}"
-    return None
-
-
 def extract_year(text):
-    m = re.search(r"\b(20\d{2}|19\d{2})\b", text)
+    m = safe_search(r"\b(20\d{2}|19\d{2})\b", text)
     return m.group(1) if m else None
 
 
@@ -169,6 +185,8 @@ def extract_heating(text):
         return "автономне"
     if "індивідуаль" in low:
         return "індивідуальне"
+    if "индивидуаль" in low:
+        return "індивідуальне"
     return None
 
 
@@ -176,14 +194,17 @@ def extract_address(text):
     patterns = [
         r"(ЖК\s+[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9«»\"'`\- ]+)",
         r"(вул\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\- ]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
+        r"(улица\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\- ]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
         r"(просп\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\- ]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
         r"(пров\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\- ]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
         r"(бул\.?\s*[A-ЯІЇЄA-Za-zА-Яа-яіїє0-9\- ]+(?:,\s*\d+[A-Za-zА-Яа-я]?)?)",
     ]
     for p in patterns:
-        m = re.search(p, text, re.IGNORECASE)
+        m = safe_search(p, text)
         if m:
-            return normalize_spaces(m.group(1))
+            addr = normalize_spaces(m.group(1))
+            addr = addr.replace("улица", "вулиця")
+            return addr
     return None
 
 
@@ -213,48 +234,6 @@ def calc_price_per_m2(price_value, area_value):
     if not p or not a or a <= 0:
         return None
     return f"{round(p / a)} $/м²"
-
-
-def collect_images_basic(soup):
-    images = set()
-
-    for img in soup.find_all("img"):
-        for attr in ["src", "data-src", "data-lazy", "srcset"]:
-            val = img.get(attr)
-            if not val:
-                continue
-
-            if attr == "srcset":
-                for part in val.split(","):
-                    u = part.strip().split(" ")[0]
-                    if u.startswith("http"):
-                        images.add(u)
-            else:
-                if val.startswith("http"):
-                    images.add(val)
-
-    for meta in soup.find_all("meta"):
-        prop = (meta.get("property") or meta.get("name") or "").lower()
-        content = meta.get("content") or ""
-        if prop in ["og:image", "twitter:image"] and content.startswith("http"):
-            images.add(content)
-
-    for script in soup.find_all("script"):
-        content = script.string or script.get_text()
-        if not content:
-            continue
-        urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
-        for u in urls:
-            images.add(u)
-
-    cleaned = []
-    for u in images:
-        low = u.lower()
-        if any(x in low for x in ["logo", "icon", "avatar", "svg", "thumb", "thumbnail"]):
-            continue
-        cleaned.append(u)
-
-    return cleaned[:10]
 
 
 def extract_json_ld_objects(soup):
@@ -307,6 +286,17 @@ def extract_meta_description(soup):
     return ""
 
 
+def extract_meta_images(soup):
+    images = set()
+    for key in ["og:image", "twitter:image"]:
+        tag = soup.find("meta", attrs={"property": key}) or soup.find("meta", attrs={"name": key})
+        if tag:
+            content = tag.get("content")
+            if content and content.startswith("http"):
+                images.add(content)
+    return list(images)
+
+
 def extract_section_by_heading(soup, heading_text="Опис"):
     tags = soup.find_all(["h1", "h2", "h3", "h4", "div", "span", "p", "section"])
     for tag in tags:
@@ -325,6 +315,99 @@ def extract_section_by_heading(soup, heading_text="Опис"):
                     block_text = block_text.replace(heading_text, "", 1).strip()
                     return clean_description(block_text)
     return ""
+
+
+def collect_images_basic(soup):
+    images = set()
+
+    for img in soup.find_all("img"):
+        for attr in ["src", "data-src", "data-lazy", "srcset"]:
+            val = img.get(attr)
+            if not val:
+                continue
+
+            if attr == "srcset":
+                for part in val.split(","):
+                    u = part.strip().split(" ")[0]
+                    if u.startswith("http"):
+                        images.add(u)
+            else:
+                if val.startswith("http"):
+                    images.add(val)
+
+    images.update(extract_meta_images(soup))
+    images.update(extract_images_from_jsonld(soup))
+
+    for script in soup.find_all("script"):
+        content = script.string or script.get_text()
+        if not content:
+            continue
+        urls = re.findall(r'https://[^"\']+\.(?:jpg|jpeg|png|webp)', content)
+        for u in urls:
+            images.add(u)
+
+    cleaned = []
+    for u in images:
+        low = u.lower()
+        if any(x in low for x in ["logo", "icon", "avatar", "svg", "thumb", "thumbnail"]):
+            continue
+        cleaned.append(u)
+
+    # прибираємо дублікати, зберігаючи порядок
+    unique = list(dict.fromkeys(cleaned))
+    return unique[:10]
+
+
+def extract_floor_olx(text):
+    patterns = [
+        r"Поверх:\s*(\d+)\s*/\s*(\d+)",
+        r"Поверх:\s*(\d+)\s*з\s*(\d+)",
+        r"поверх[^0-9]{0,10}(\d+)\s*/\s*(\d+)",
+        r"поверх[^0-9]{0,10}(\d+)\s*з\s*(\d+)",
+    ]
+    for p in patterns:
+        m = safe_search(p, text)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def extract_floor_general(text):
+    patterns = [
+        r"Поверх[^0-9]{0,15}(\d+)\s*(?:з|/)\s*(\d+)",
+        r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
+        r"поверх[^0-9]{0,10}(\d+)\s*(?:з|/)\s*(\d+)",
+    ]
+    for p in patterns:
+        m = safe_search(p, text)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def extract_floor_lun(text):
+    m = safe_search(r"поверх\s*(\d+)\s*з\s*(\d+)", text)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    m = safe_search(r"(\d+)\s*/\s*(\d+)\s*поверх", text)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    return None
+
+
+def extract_floor_domria(text):
+    patterns = [
+        r"Поверх[^0-9]{0,20}(\d+)\s*(?:з|/)\s*(\d+)",
+        r"поверх[^0-9]{0,20}(\d+)\s*(?:з|/)\s*(\d+)",
+        r"(\d+)\s*(?:з|/)\s*(\d+)\s*поверх",
+    ]
+    for p in patterns:
+        m = safe_search(p, text)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    return None
 
 
 def build_base_data(text):
@@ -390,11 +473,10 @@ def parse_olx(url):
                 description = clean_description(t)
                 break
 
-    images = set(collect_images_basic(soup))
-    images.update(extract_images_from_jsonld(soup))
+    images = collect_images_basic(soup)
 
     data["description"] = clean_description(description)
-    data["images"] = list(images)[:10]
+    data["images"] = images
     data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
     return data
 
@@ -407,8 +489,7 @@ def parse_lun(url):
     data = build_base_data(text)
     data["floor"] = extract_floor_lun(text) or extract_floor_general(text)
 
-    # для LUN іноді площа є в блоці типу 43.8 / 16.9 / 11.7 м²
-    m = re.search(r"(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*м²", text, re.IGNORECASE)
+    m = safe_search(r"(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*м²", text)
     if m:
         data["area"] = m.group(1).replace(",", ".") + " м²"
 
@@ -424,11 +505,10 @@ def parse_lun(url):
                 description = clean_description(t)
                 break
 
-    images = set(collect_images_basic(soup))
-    images.update(extract_images_from_jsonld(soup))
+    images = collect_images_basic(soup)
 
     data["description"] = clean_description(description)
-    data["images"] = list(images)[:10]
+    data["images"] = images
     data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
     return data
 
@@ -470,9 +550,8 @@ def parse_domria(url):
                 break
 
     images = set(collect_images_basic(soup))
-    images.update(extract_images_from_jsonld(soup))
 
-    # окремий добір для DOM.RIA зі script
+    # Додатковий витяг для DOM.RIA
     for script in soup.find_all("script"):
         content = script.string or script.get_text()
         if not content:
@@ -485,7 +564,7 @@ def parse_domria(url):
                     images.add(u)
 
     data["description"] = clean_description(description)
-    data["images"] = list(images)[:10]
+    data["images"] = list(dict.fromkeys(images))[:10]
     data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
     return data
 
@@ -528,7 +607,6 @@ def parse_realtor(url):
                 break
 
     images = set(collect_images_basic(soup))
-    images.update(extract_images_from_jsonld(soup))
 
     for script in soup.find_all("script"):
         content = script.string or script.get_text()
@@ -542,7 +620,7 @@ def parse_realtor(url):
                     images.add(u)
 
     data["description"] = clean_description(description)
-    data["images"] = list(images)[:10]
+    data["images"] = list(dict.fromkeys(images))[:10]
     data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
     return data
 
@@ -568,11 +646,10 @@ def parse_fallback(url):
                 description = clean_description(t)
                 break
 
-    images = set(collect_images_basic(soup))
-    images.update(extract_images_from_jsonld(soup))
+    images = collect_images_basic(soup)
 
     data["description"] = clean_description(description)
-    data["images"] = list(images)[:10]
+    data["images"] = images
     data["price_per_m2"] = calc_price_per_m2(data.get("price"), data.get("area"))
     return data
 
